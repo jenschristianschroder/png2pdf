@@ -110,6 +110,24 @@ module appRegistration 'modules/app-registration.bicep' = {
   }
 }
 
+// ─── MCP Container App (MCP Server) ───
+module mcpContainerApp 'modules/mcp-container-app.bicep' = {
+  name: 'mcp-container-app'
+  scope: rg
+  params: {
+    environmentName: environmentName
+    location: location
+    containerAppsEnvironmentId: containerApp.outputs.environmentId
+    acrLoginServer: acr.outputs.loginServer
+    acrUsername: acrCredentials.outputs.username
+    acrPassword: acrCredentials.outputs.acrCredential
+    imageName: ''
+    mcpClientId: appRegistration.outputs.mcpClientId
+    tenantId: tenantId
+    appInsightsConnectionString: appInsights.outputs.connectionString
+  }
+}
+
 // ─── Function App (API) ───
 module functionApp 'modules/function-app.bicep' = {
   name: 'function-app'
@@ -137,3 +155,7 @@ output ACR_LOGIN_SERVER string = acr.outputs.loginServer
 output API_CLIENT_ID string = appRegistration.outputs.apiClientId
 output API_IDENTIFIER_URI string = appRegistration.outputs.apiIdentifierUri
 output WEB_CLIENT_ID string = appRegistration.outputs.webClientId
+output MCP_URL string = 'https://${mcpContainerApp.outputs.fqdn}'
+output MCP_CONTAINER_APP_NAME string = mcpContainerApp.outputs.name
+output MCP_CLIENT_ID string = appRegistration.outputs.mcpClientId
+output MCP_IDENTIFIER_URI string = appRegistration.outputs.mcpIdentifierUri

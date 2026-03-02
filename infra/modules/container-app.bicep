@@ -133,3 +133,6 @@ output id string = containerApp.id
 
 @description('Container App system-assigned managed identity principal ID')
 output principalId string = containerApp.identity.principalId
+
+@description('Container Apps Environment ID (for sharing with other Container Apps)')
+output environmentId string = containerAppEnv.id
