@@ -1,0 +1,28 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+
+name: png2pdf
+metadata:
+  template: png2pdf@0.0.1-beta
+
+hooks:
+  postprovision:
+    windows:
+      shell: pwsh
+      run: ./hooks/postprovision.ps1
+    posix:
+      shell: sh
+      run: pwsh -File ./hooks/postprovision.ps1
+
+services:
+  api:
+    project: ./src/function-app
+    language: python
+    host: function
+
+  web:
+    project: ./src/web
+    language: python
+    host: containerapp
+    docker:
+      path: ./Dockerfile
+      registry: ${ACR_LOGIN_SERVER}

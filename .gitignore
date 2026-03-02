@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+.python_packages/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Azure Developer CLI
+.azure/
+
+# Azure Functions local settings (contains secrets)
+local.settings.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Build artifacts
+*.zip
+
+# Test / generated files
+*.pdf
+test.png
+output.pdf
+test_output.pdf
+
+# Legacy CLI script (superseded by Azure project)
+/png2pdf.py
+/requirements.txt

@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PNG to PDF Converter</title>
+  <style>
+    :root {
+      --accent: #0078d4;
+      --accent-hover: #106ebe;
+      --bg: #f5f5f5;
+      --card: #ffffff;
+      --border: #e0e0e0;
+      --text: #323130;
+      --muted: #605e5c;
+      --success: #107c10;
+      --error: #d13438;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      background: var(--accent);
+      color: #fff;
+      padding: 0.75rem 1.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    header h1 { font-size: 1.125rem; font-weight: 600; }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.45rem 1rem;
+      border: none;
+      border-radius: 4px;
+      font-size: 0.875rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:hover { background: var(--accent-hover); }
+    main {
+      flex: 1;
+      display: flex;
+      justify-content: center;
+      padding: 2.5rem 1rem;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 2rem;
+      width: 100%;
+      max-width: 520px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    }
+    .card h2 { font-size: 1.25rem; margin-bottom: 1.25rem; }
+
+    /* ---------- drop zone ---------- */
+    .drop-zone {
+      border: 2px dashed var(--border);
+      border-radius: 8px;
+      padding: 2rem;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.15s, background 0.15s;
+      margin-bottom: 1rem;
+    }
+    .drop-zone.drag-over {
+      border-color: var(--accent);
+      background: rgba(0,120,212,0.06);
+    }
+    .drop-zone p { color: var(--muted); margin-top: 0.5rem; font-size: 0.875rem; }
+    .drop-zone .icon { font-size: 2rem; }
+    #file-input { display: none; }
+
+    /* ---------- status ---------- */
+    #file-name {
+      font-size: 0.875rem;
+      color: var(--muted);
+      margin-bottom: 1rem;
+      min-height: 1.25rem;
+    }
+    #status {
+      font-size: 0.875rem;
+      min-height: 1.5rem;
+      margin-top: 0.75rem;
+    }
+    .status-ok { color: var(--success); }
+    .status-err { color: var(--error); }
+    .spinner {
+      display: inline-block;
+      width: 14px; height: 14px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+      vertical-align: middle;
+      margin-right: 0.4rem;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    footer {
+      text-align: center;
+      padding: 0.75rem;
+      font-size: 0.75rem;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>PNG to PDF Converter</h1>
+  </header>
+
+  <main>
+    <div class="card">
+      <h2>Upload a PNG</h2>
+
+      <div class="drop-zone" id="drop-zone">
+        <div class="icon">&#128196;</div>
+        <p>Drag &amp; drop a PNG here, or click to browse</p>
+      </div>
+      <input type="file" id="file-input" accept="image/png" />
+      <div id="file-name"></div>
+
+      <button class="btn btn-primary" id="convert-btn" disabled onclick="convert()">
+        Convert to PDF
+      </button>
+
+      <div id="status"></div>
+    </div>
+  </main>
+
+  <footer>&copy; 2026 PNG to PDF Converter</footer>
+
+  <script>
+    // ---- File Handling ----
+    let selectedFile = null;
+    const dropZone = document.getElementById("drop-zone");
+    const fileInput = document.getElementById("file-input");
+    const convertBtn = document.getElementById("convert-btn");
+    const fileNameEl = document.getElementById("file-name");
+    const statusEl = document.getElementById("status");
+
+    dropZone.addEventListener("click", () => fileInput.click());
+    dropZone.addEventListener("dragover", (e) => { e.preventDefault(); dropZone.classList.add("drag-over"); });
+    dropZone.addEventListener("dragleave", () => dropZone.classList.remove("drag-over"));
+    dropZone.addEventListener("drop", (e) => {
+      e.preventDefault();
+      dropZone.classList.remove("drag-over");
+      const file = e.dataTransfer.files[0];
+      if (file && file.type === "image/png") selectFile(file);
+      else setStatus("Please drop a PNG file.", true);
+    });
+    fileInput.addEventListener("change", () => {
+      if (fileInput.files[0]) selectFile(fileInput.files[0]);
+    });
+
+    function selectFile(file) {
+      selectedFile = file;
+      fileNameEl.textContent = file.name + " (" + (file.size / 1024).toFixed(1) + " KB)";
+      convertBtn.disabled = false;
+      statusEl.textContent = "";
+    }
+
+    function setStatus(msg, isError) {
+      statusEl.className = isError ? "status-err" : "status-ok";
+      statusEl.innerHTML = msg;
+    }
+
+    // ---- Conversion (calls Flask proxy, which forwards to Function App with managed identity) ----
+    async function convert() {
+      if (!selectedFile) return;
+      convertBtn.disabled = true;
+      statusEl.className = "";
+      statusEl.innerHTML = '<span class="spinner"></span> Converting\u2026';
+
+      try {
+        const formData = new FormData();
+        formData.append("file", selectedFile);
+
+        const resp = await fetch("/api/convert", {
+          method: "POST",
+          body: formData,
+        });
+
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({ error: resp.statusText }));
+          throw new Error(err.error || resp.statusText);
+        }
+
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = selectedFile.name.replace(/\.png$/i, ".pdf");
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+
+        setStatus("&#9989; PDF downloaded!", false);
+      } catch (err) {
+        setStatus("&#10060; " + err.message, true);
+      } finally {
+        convertBtn.disabled = false;
+      }
+    }
+  </script>
+</body>
+</html>
