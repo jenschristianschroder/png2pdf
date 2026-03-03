@@ -3,10 +3,13 @@
 Exposes the convert_png_to_pdf tool via Streamable HTTP transport.
 Proxies conversion requests to the existing Azure Function App.
 
-Implements MCP Authorization Specification (2025-06-18):
-  - GET /.well-known/oauth-protected-resource  (RFC 9728)
-  - Bearer token validation against Entra ID   (Layers 1+2)
-  - Managed identity for backend calls         (Layer 3)
+Uses the MCP SDK's built-in OAuth framework for authentication:
+  - POST /register  → Dynamic Client Registration (RFC 7591)
+  - GET  /authorize → Authorization Code flow with PKCE (RFC 7636)
+  - POST /token     → Token exchange
+  - GET  /.well-known/oauth-protected-resource   (RFC 9728)
+  - GET  /.well-known/oauth-authorization-server  (RFC 8414)
+  - Managed identity for backend calls (Layer 3)
 """
 
 import os
@@ -15,6 +18,7 @@ import base64
 import json
 import logging
 import time
+from contextlib import asynccontextmanager
 
 import httpx
 from azure.identity.aio import DefaultAzureCredential
@@ -23,18 +27,14 @@ from starlette.applications import Starlette
 from starlette.routing import Mount, Route
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-from starlette.middleware import Middleware
-from starlette.middleware.base import BaseHTTPMiddleware
 
-from auth import validate_token, AuthError
+from auth_provider import McpAuthProvider
 
 # ─── Configuration ───
 FUNCTION_URL = os.environ.get("FUNCTION_URL", "http://localhost:7071")
 API_IDENTIFIER_URI = os.environ.get("API_IDENTIFIER_URI", "api://png2pdf-api")
-AZURE_TENANT_ID = os.environ.get("AZURE_TENANT_ID", "")
-MCP_CLIENT_ID = os.environ.get("MCP_CLIENT_ID", "")
-MCP_IDENTIFIER_URI = os.environ.get("MCP_IDENTIFIER_URI", "api://png2pdf-mcp")
 PORT = int(os.environ.get("PORT", "8080"))
+MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", f"http://localhost:{PORT}")
 MAX_INPUT_SIZE = 10 * 1024 * 1024  # 10 MB
 
 # ─── Logging ───
@@ -48,52 +48,34 @@ logger = logging.getLogger("mcp-server")
 # ─── Azure credential for calling Function App (Layer 3 — managed identity) ───
 credential = DefaultAzureCredential()
 
-# ─── MCP Server ───
+# ─── Auth provider ───
+auth_provider = McpAuthProvider()
+
+# ─── MCP Server with built-in OAuth ───
+# The SDK automatically creates these routes:
+#   /.well-known/oauth-protected-resource    (RFC 9728)
+#   /.well-known/oauth-authorization-server  (RFC 8414)
+#   /register   (Dynamic Client Registration)
+#   /authorize  (Authorization Code + PKCE)
+#   /token      (Token exchange)
+#   /revoke     (Token revocation)
+#   /mcp        (Streamable HTTP — protected by token verifier)
 mcp = FastMCP(
     "PNG to PDF Converter",
     instructions="Converts PNG images to PDF documents with matching page dimensions.",
+    auth_server_provider=auth_provider,
+    auth={
+        "issuer_url": MCP_SERVER_URL,
+        "resource_server_url": MCP_SERVER_URL,
+        "client_registration_options": {
+            "enabled": True,
+            "valid_scopes": ["convert"],
+            "default_scopes": ["convert"],
+        },
+        "revocation_options": {"enabled": True},
+        "required_scopes": ["convert"],
+    },
 )
-
-
-# ─── Authentication Middleware ───
-# Paths that must be served WITHOUT authentication (MCP spec + health probes)
-PUBLIC_PATHS = {
-    "/.well-known/oauth-protected-resource",
-    "/health",
-}
-
-
-class AuthMiddleware(BaseHTTPMiddleware):
-    """Validates Bearer tokens on MCP endpoints (Layer 1 + 2).
-
-    Public endpoints (well-known metadata, health) are exempt from auth
-    per the MCP Authorization Specification (2025-06-18).
-    """
-
-    async def dispatch(self, request: Request, call_next):
-        # Skip auth for public paths and CORS preflight
-        if request.url.path in PUBLIC_PATHS or request.method == "OPTIONS":
-            return await call_next(request)
-
-        try:
-            auth_header = request.headers.get("Authorization")
-            auth_context = await validate_token(auth_header)
-            request.state.auth_context = auth_context
-        except AuthError as e:
-            logger.warning("Auth failed: %s", e.message)
-            # Return WWW-Authenticate header per RFC 6750 §3
-            scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
-            host = request.headers.get("host", request.url.netloc)
-            resource_metadata_url = f"{scheme}://{host}/.well-known/oauth-protected-resource"
-            return JSONResponse(
-                {"error": e.message},
-                status_code=e.status_code,
-                headers={
-                    "WWW-Authenticate": f'Bearer resource_metadata="{resource_metadata_url}"',
-                },
-            )
-
-        return await call_next(request)
 
 
 # ─── MCP Tool ───
@@ -187,43 +169,6 @@ async def convert_png_to_pdf(png_base64: str, filename: str = "image") -> str:
         return json.dumps({"error": f"Conversion failed: {str(e)}"})
 
 
-# ─── OAuth Protected Resource Metadata (RFC 9728) ───
-# Per MCP Authorization Spec (2025-06-18), this tells MCP clients
-# which authorization server to use and what scopes are available.
-
-
-async def oauth_protected_resource(request: Request) -> JSONResponse:
-    """Serve RFC 9728 Protected Resource Metadata.
-
-    This endpoint is the entry point for MCP auth discovery:
-    1. MCP client (Copilot Studio) fetches this to learn where to get tokens
-    2. It discovers Entra ID as the authorization server
-    3. It fetches Entra ID's openid-configuration for authorize/token endpoints
-    4. It authenticates and sends Bearer tokens on subsequent MCP requests
-    """
-    # Use X-Forwarded-Proto to get the real scheme behind a TLS-terminating proxy
-    scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
-    host = request.headers.get("host", request.url.netloc)
-    server_url = f"{scheme}://{host}"
-
-    return JSONResponse(
-        {
-            "resource": server_url,
-            "authorization_servers": [
-                f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/v2.0"
-            ],
-            "scopes_supported": [
-                f"{MCP_IDENTIFIER_URI}/Convert.ReadWrite",
-            ],
-            "bearer_methods_supported": ["header"],
-            "resource_documentation": f"{server_url}/health",
-        },
-        headers={
-            "Cache-Control": "public, max-age=3600",
-        },
-    )
-
-
 # ─── Health endpoint ───
 
 
@@ -236,18 +181,21 @@ async def health(request: Request) -> JSONResponse:
 
 
 def create_app() -> Starlette:
-    """Create the Starlette app with MCP routes, auth middleware, and discovery endpoints."""
+    """Create the Starlette app with MCP + OAuth routes and health endpoint."""
     mcp_app = mcp.streamable_http_app()
+
+    @asynccontextmanager
+    async def lifespan(app):
+        """Propagate MCP session manager lifecycle to parent app."""
+        async with mcp.session_manager.run():
+            yield
 
     app = Starlette(
         routes=[
-            Route("/.well-known/oauth-protected-resource", oauth_protected_resource, methods=["GET"]),
             Route("/health", health, methods=["GET"]),
             Mount("/", app=mcp_app),
         ],
-        middleware=[
-            Middleware(AuthMiddleware),
-        ],
+        lifespan=lifespan,
     )
     return app
 

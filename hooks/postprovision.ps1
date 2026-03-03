@@ -74,6 +74,7 @@ Write-Host ""
 Write-Host "Updating MCP Container App environment variables..."
 
 $mcpAppName = $env:MCP_CONTAINER_APP_NAME
+$mcpUrl     = $env:MCP_URL
 
 if (-not $mcpAppName) {
     Write-Warning "MCP_CONTAINER_APP_NAME env var is not set - skipping MCP Container App update."
@@ -81,8 +82,9 @@ if (-not $mcpAppName) {
     Write-Host "  MCP Container App  : $mcpAppName"
     Write-Host "  Function URL       : $funcUrl"
     Write-Host "  API Identifier URI : $apiUri"
+    Write-Host "  MCP Server URL     : $mcpUrl"
 
-    az containerapp update -n $mcpAppName -g $rgName --subscription $subId --set-env-vars "FUNCTION_URL=$funcUrl" "API_IDENTIFIER_URI=$apiUri"
+    az containerapp update -n $mcpAppName -g $rgName --subscription $subId --set-env-vars "FUNCTION_URL=$funcUrl" "API_IDENTIFIER_URI=$apiUri" "MCP_SERVER_URL=$mcpUrl"
 
     Write-Host "MCP Container App updated successfully."
 }
