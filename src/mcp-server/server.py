@@ -90,7 +90,13 @@ auth_provider = McpAuthProvider()
 #   /           (Streamable HTTP — protected by bearer auth)
 mcp = FastMCP(
     "PNG to PDF Converter",
-    instructions="Converts PNG images to PDF documents with matching page dimensions.",
+    instructions=(
+        "Converts PNG images to PDF documents with matching page dimensions. "
+        "To convert, use the convert_png_to_pdf tool. "
+        "You can provide the image as a URL (png_url) — this is preferred and "
+        "avoids the need to base64-encode the image. Alternatively, you can "
+        "provide the image data as a base64-encoded string (png_base64)."
+    ),
     auth_server_provider=auth_provider,
     streamable_http_path="/",
     auth={
@@ -111,47 +117,61 @@ mcp = FastMCP(
 )
 
 
-# ─── MCP Tool ───
+# ─── Shared helper: resolve PNG bytes from various inputs ───
 
 
-@mcp.tool()
-async def convert_png_to_pdf(png_base64: str, filename: str = "image") -> str:
-    """Convert a PNG image to a PDF document with matching page dimensions.
+async def _resolve_png_input(
+    png_base64: str | None, png_url: str | None
+) -> tuple[bytes | None, str | None]:
+    """Resolve PNG bytes from either base64 or URL input.
 
-    The PNG image is sent as a base64-encoded string. The resulting PDF is
-    stored in Azure Blob Storage and a download URL is returned.
-
-    Args:
-        png_base64: Base64-encoded PNG image data.
-        filename: Optional original filename (without extension). Defaults to "image".
-
-    Returns:
-        JSON string with download_url (URL to download the PDF via proxy),
-        filename, and size_bytes.
+    Returns (png_bytes, error_message). If error_message is set, png_bytes is None.
     """
+    if png_url:
+        # Download the image from the provided URL
+        try:
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                resp = await client.get(png_url)
+            if resp.status_code != 200:
+                return None, f"Failed to download image from URL (HTTP {resp.status_code})"
+            png_bytes = resp.content
+            if not png_bytes:
+                return None, "Downloaded empty content from URL"
+            if len(png_bytes) > MAX_INPUT_SIZE:
+                return None, "Downloaded image exceeds 10 MB limit"
+            return png_bytes, None
+        except httpx.TimeoutException:
+            return None, "Timeout downloading image from URL"
+        except Exception as exc:
+            return None, f"Failed to download image from URL: {exc}"
+
+    if png_base64:
+        try:
+            png_bytes = base64.b64decode(png_base64)
+        except Exception:
+            return None, "Invalid base64 encoding"
+        if len(png_bytes) == 0:
+            return None, "Empty PNG data"
+        if len(png_bytes) > MAX_INPUT_SIZE:
+            return None, "PNG exceeds 10 MB limit"
+        return png_bytes, None
+
+    return None, "Either png_url or png_base64 must be provided"
+
+
+# ─── Shared helper: call Function App and return result ───
+
+
+async def _convert_and_store(png_bytes: bytes, filename: str) -> dict:
+    """Send PNG bytes to Function App, return result dict with download_url or error."""
     start_time = time.time()
 
-    # Validate input
-    if not png_base64:
-        return json.dumps({"error": "png_base64 is required"})
-
     try:
-        png_bytes = base64.b64decode(png_base64)
-    except Exception:
-        return json.dumps({"error": "Invalid base64 encoding"})
-
-    if len(png_bytes) == 0:
-        return json.dumps({"error": "Empty PNG data"})
-
-    if len(png_bytes) > MAX_INPUT_SIZE:
-        return json.dumps({"error": "PNG exceeds 10 MB limit"})
-
-    try:
-        # Acquire managed identity token for Function App (Layer 3)
+        # Acquire managed identity token for Function App
         scope = f"{API_IDENTIFIER_URI}/.default"
         token = await credential.get_token(scope)
 
-        # Build multipart form data matching the Function App's expected format
+        # Build multipart form data
         output_filename = filename.removesuffix(".png").removesuffix(".PNG") + ".pdf"
         files = {"file": (f"{filename}.png", png_bytes, "image/png")}
 
@@ -173,23 +193,17 @@ async def convert_png_to_pdf(png_base64: str, filename: str = "image") -> str:
                 error_detail,
                 duration_ms,
             )
-            return json.dumps(
-                {
-                    "error": f"Conversion failed (HTTP {response.status_code}): {error_detail}"
-                }
-            )
+            return {"error": f"Conversion failed (HTTP {response.status_code}): {error_detail}"}
 
-        # Parse JSON response from Function App (blob_name, filename, size_bytes)
+        # Parse JSON response from Function App
         try:
             data = response.json()
         except Exception:
-            return json.dumps({"error": "Invalid response from Function App"})
+            return {"error": "Invalid response from Function App"}
 
         blob_name = data.get("blob_name", "")
         output_filename = data.get("filename", filename + ".pdf")
         size_bytes = data.get("size_bytes", 0)
-
-        # Build download URL through the MCP server proxy
         download_url = f"{MCP_SERVER_URL}/download/{blob_name}"
 
         logger.info(
@@ -200,17 +214,98 @@ async def convert_png_to_pdf(png_base64: str, filename: str = "image") -> str:
             duration_ms,
         )
 
-        return json.dumps(
-            {
-                "download_url": download_url,
-                "filename": output_filename,
-                "size_bytes": size_bytes,
-            }
-        )
+        return {
+            "download_url": download_url,
+            "filename": output_filename,
+            "size_bytes": size_bytes,
+        }
 
     except Exception as e:
         logger.exception("Conversion error")
-        return json.dumps({"error": f"Conversion failed: {str(e)}"})
+        return {"error": f"Conversion failed: {str(e)}"}
+
+
+# ─── MCP Tool ───
+
+
+@mcp.tool()
+async def convert_png_to_pdf(
+    png_base64: str = "", png_url: str = "", filename: str = "image"
+) -> str:
+    """Convert a PNG image to a PDF document with matching page dimensions.
+
+    Provide the PNG image in ONE of two ways:
+    - png_url: A URL pointing to the PNG image (preferred — the server downloads it).
+    - png_base64: The PNG image data as a base64-encoded string.
+
+    The resulting PDF is stored in Azure Blob Storage and a download URL is returned.
+
+    Args:
+        png_base64: Base64-encoded PNG image data. Use this OR png_url.
+        png_url: URL of the PNG image to convert. Use this OR png_base64 (preferred).
+        filename: Optional original filename (without extension). Defaults to "image".
+
+    Returns:
+        JSON string with download_url (URL to download the PDF via proxy),
+        filename, and size_bytes.
+    """
+    png_bytes, error = await _resolve_png_input(
+        png_base64 or None, png_url or None
+    )
+    if error:
+        return json.dumps({"error": error})
+
+    result = await _convert_and_store(png_bytes, filename)
+    return json.dumps(result)
+
+
+# ─── Upload endpoint (direct HTTP, not MCP) ───
+
+
+async def upload_png(request: Request) -> JSONResponse:
+    """Accept a PNG file via multipart form upload and return a PDF download URL.
+
+    This endpoint provides a direct HTTP alternative to the MCP tool, useful for
+    Copilot Studio connectors or any HTTP client that can POST a file.
+    Expects multipart/form-data with a 'file' field containing the PNG image.
+    """
+    content_type = request.headers.get("content-type", "")
+
+    if "multipart/form-data" not in content_type:
+        return JSONResponse(
+            {"error": "Expected multipart/form-data with a 'file' field"},
+            status_code=400,
+        )
+
+    try:
+        form = await request.form()
+        upload = form.get("file")
+        if upload is None:
+            return JSONResponse(
+                {"error": "No 'file' field in multipart upload"}, status_code=400
+            )
+
+        png_bytes = await upload.read()
+        original_name = getattr(upload, "filename", "image.png") or "image.png"
+
+        if not png_bytes:
+            return JSONResponse({"error": "Empty file"}, status_code=400)
+        if len(png_bytes) > MAX_INPUT_SIZE:
+            return JSONResponse(
+                {"error": "File exceeds 10 MB limit"}, status_code=400
+            )
+
+        filename = original_name.rsplit(".", 1)[0] if "." in original_name else original_name
+        result = await _convert_and_store(png_bytes, filename)
+
+        status_code = 200 if "error" not in result else 500
+        return JSONResponse(result, status_code=status_code)
+
+    except Exception as exc:
+        logger.exception("Upload endpoint error")
+        return JSONResponse(
+            {"error": f"Upload failed: {str(exc)}"}, status_code=500
+        )
 
 
 # ─── Download proxy endpoint ───
@@ -277,6 +372,7 @@ def create_app() -> Starlette:
     app = Starlette(
         routes=[
             Route("/health", health, methods=["GET"]),
+            Route("/upload", upload_png, methods=["POST"]),
             Route("/download/{blob_name}", download_pdf, methods=["GET"]),
             Mount("/", app=mcp_app),
         ],
