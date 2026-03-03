@@ -32,6 +32,9 @@ param tenantId string = tenant().tenantId
 @description('Application Insights connection string')
 param appInsightsConnectionString string
 
+@description('Storage account name for PDF blob access')
+param storageAccountName string = ''
+
 var resourceSuffix = take(uniqueString(subscription().id, resourceGroup().id, environmentName), 6)
 var appName = 'ca-mcp-${environmentName}-${resourceSuffix}'
 
@@ -88,6 +91,7 @@ resource mcpContainerApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'MCP_CLIENT_ID', value: mcpClientId }
             { name: 'MCP_IDENTIFIER_URI', value: 'api://png2pdf-mcp' }
             { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appInsightsConnectionString }
+            { name: 'STORAGE_ACCOUNT_NAME', value: storageAccountName }
             { name: 'PORT', value: '8080' }
           ]
           probes: [

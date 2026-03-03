@@ -3,4 +3,6 @@ Pillow
 reportlab
 PyJWT[crypto]>=2.8
 requests>=2.31
+azure-identity>=1.15.0
+azure-storage-blob>=12.19.0
 

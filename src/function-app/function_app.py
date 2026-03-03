@@ -1,10 +1,14 @@
 """Azure Function App — PNG-to-PDF HTTP trigger (Python v2 programming model)."""
 
+import json
 import logging
 import os
+import uuid
 
 import azure.functions as func
 import jwt
+from azure.identity import DefaultAzureCredential
+from azure.storage.blob import BlobServiceClient, ContentSettings
 
 from png_to_pdf import png_bytes_to_pdf_bytes
 
@@ -16,6 +20,21 @@ _TENANT_ID = os.environ.get("AZURE_TENANT_ID", "")
 # Accept both the identifier URI and the client ID as valid audiences
 _API_CLIENT_ID = os.environ.get("API_CLIENT_ID", "")
 _VALID_AUDIENCES = [aud for aud in ["api://png2pdf-api", _API_CLIENT_ID] if aud]
+
+# Blob storage config
+_STORAGE_ACCOUNT_NAME = os.environ.get("STORAGE_ACCOUNT_NAME", "")
+_CONTAINER_NAME = "pdfs"
+_blob_service_client = None
+
+
+def _get_blob_service_client() -> BlobServiceClient:
+    """Get a cached BlobServiceClient using managed identity."""
+    global _blob_service_client
+    if _blob_service_client is None:
+        account_url = f"https://{_STORAGE_ACCOUNT_NAME}.blob.core.windows.net"
+        credential = DefaultAzureCredential()
+        _blob_service_client = BlobServiceClient(account_url, credential=credential)
+    return _blob_service_client
 
 
 def _get_jwks_client():
@@ -102,11 +121,35 @@ def convert(req: func.HttpRequest) -> func.HttpResponse:
             mimetype="application/json",
         )
 
-    # --- respond with PDF --------------------------------------------------
+    # --- upload to blob storage --------------------------------------------
     pdf_name = original_name.rsplit(".", 1)[0] + ".pdf"
+    blob_name = f"{uuid.uuid4()}.pdf"
+
+    try:
+        blob_client = _get_blob_service_client().get_blob_client(
+            container=_CONTAINER_NAME, blob=blob_name
+        )
+        blob_client.upload_blob(
+            pdf_bytes,
+            content_settings=ContentSettings(content_type="application/pdf"),
+            overwrite=True,
+        )
+        logging.info("Uploaded PDF to blob: %s (%d bytes)", blob_name, len(pdf_bytes))
+    except Exception as exc:
+        logging.exception("Failed to upload PDF to blob storage")
+        return func.HttpResponse(
+            f'{{"error": "Failed to store PDF: {exc}"}}',
+            status_code=500,
+            mimetype="application/json",
+        )
+
+    # --- respond with blob metadata ----------------------------------------
     return func.HttpResponse(
-        pdf_bytes,
+        json.dumps({
+            "blob_name": blob_name,
+            "filename": pdf_name,
+            "size_bytes": len(pdf_bytes),
+        }),
         status_code=200,
-        mimetype="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{pdf_name}"'},
+        mimetype="application/json",
     )

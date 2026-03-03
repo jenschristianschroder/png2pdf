@@ -194,22 +194,22 @@
           body: formData,
         });
 
+        const data = await resp.json().catch(() => ({ error: resp.statusText }));
+
         if (!resp.ok) {
-          const err = await resp.json().catch(() => ({ error: resp.statusText }));
-          throw new Error(err.error || resp.statusText);
+          throw new Error(data.error || resp.statusText);
         }
 
-        const blob = await resp.blob();
-        const url = URL.createObjectURL(blob);
+        // Auto-trigger download via the proxy URL
         const a = document.createElement("a");
-        a.href = url;
-        a.download = selectedFile.name.replace(/\.png$/i, ".pdf");
+        a.href = data.download_url;
+        a.download = data.filename || selectedFile.name.replace(/\.png$/i, ".pdf");
         document.body.appendChild(a);
         a.click();
         a.remove();
-        URL.revokeObjectURL(url);
 
-        setStatus("&#9989; PDF downloaded!", false);
+        const sizeKB = data.size_bytes ? " (" + (data.size_bytes / 1024).toFixed(1) + " KB)" : "";
+        setStatus("&#9989; PDF downloaded!" + sizeKB, false);
       } catch (err) {
         setStatus("&#10060; " + err.message, true);
       } finally {

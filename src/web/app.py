@@ -2,21 +2,30 @@
 
 Proxies /api/convert requests to the Azure Function App using the Container App's
 system-assigned managed identity for authentication.
+Serves /api/download/<blob_name> as a proxy to blob storage (MI-based access).
 """
 
 import os
+import re
 
 import requests as http_requests
 from azure.identity import DefaultAzureCredential
-from flask import Flask, render_template, request, Response
+from azure.storage.blob import BlobServiceClient
+from flask import Flask, render_template, request, Response, jsonify
 
 app = Flask(__name__)
 
 FUNCTION_URL = os.environ.get("FUNCTION_URL", "http://localhost:7071")
 API_IDENTIFIER_URI = os.environ.get("API_IDENTIFIER_URI", "")
+STORAGE_ACCOUNT_NAME = os.environ.get("STORAGE_ACCOUNT_NAME", "")
+CONTAINER_NAME = "pdfs"
 
 # Managed identity credential (works automatically in Azure Container Apps)
 _credential = None
+_blob_service_client = None
+
+# Validate blob names to prevent path traversal (UUID + .pdf)
+_BLOB_NAME_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.pdf$")
 
 
 def _get_credential():
@@ -24,6 +33,14 @@ def _get_credential():
     if _credential is None:
         _credential = DefaultAzureCredential()
     return _credential
+
+
+def _get_blob_service_client() -> BlobServiceClient:
+    global _blob_service_client
+    if _blob_service_client is None:
+        account_url = f"https://{STORAGE_ACCOUNT_NAME}.blob.core.windows.net"
+        _blob_service_client = BlobServiceClient(account_url, credential=_get_credential())
+    return _blob_service_client
 
 
 @app.route("/")
@@ -75,12 +92,59 @@ def proxy_convert():
             mimetype="application/json",
         )
 
-    # Pass through the Function App response
-    excluded_headers = {"transfer-encoding", "content-encoding", "connection"}
-    response_headers = {
-        k: v for k, v in resp.headers.items() if k.lower() not in excluded_headers
-    }
-    return Response(resp.content, status=resp.status_code, headers=response_headers)
+    # Pass through the Function App response (now JSON with blob_name)
+    if resp.status_code != 200:
+        return Response(resp.content, status=resp.status_code, mimetype="application/json")
+
+    try:
+        data = resp.json()
+    except Exception:
+        return Response(
+            '{"error": "Invalid response from Function App"}',
+            status=502,
+            mimetype="application/json",
+        )
+
+    # Build proxy download URL
+    blob_name = data.get("blob_name", "")
+    return jsonify({
+        "download_url": f"/api/download/{blob_name}",
+        "filename": data.get("filename", "output.pdf"),
+        "size_bytes": data.get("size_bytes", 0),
+    })
+
+
+@app.route("/api/download/<blob_name>")
+def download_pdf(blob_name):
+    """Proxy download a PDF from blob storage using managed identity."""
+    if not _BLOB_NAME_RE.match(blob_name):
+        return Response('{"error": "Invalid blob name"}', status=400, mimetype="application/json")
+
+    try:
+        blob_client = _get_blob_service_client().get_blob_client(
+            container=CONTAINER_NAME, blob=blob_name
+        )
+        download_stream = blob_client.download_blob()
+        pdf_bytes = download_stream.readall()
+        content_type = download_stream.properties.content_settings.content_type or "application/pdf"
+
+        return Response(
+            pdf_bytes,
+            status=200,
+            mimetype=content_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{blob_name}"',
+            },
+        )
+    except Exception as exc:
+        error_msg = str(exc)
+        if "BlobNotFound" in error_msg or "404" in error_msg:
+            return Response('{"error": "PDF not found"}', status=404, mimetype="application/json")
+        return Response(
+            f'{{"error": "Failed to download PDF: {error_msg}"}}',
+            status=500,
+            mimetype="application/json",
+        )
 
 
 @app.route("/health")

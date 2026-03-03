@@ -17,16 +17,18 @@ import sys
 import base64
 import json
 import logging
+import re
 import time
 from contextlib import asynccontextmanager
 
 import httpx
 from azure.identity.aio import DefaultAzureCredential
+from azure.storage.blob.aio import BlobServiceClient
 from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.routing import Mount, Route
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response as StarletteResponse
 
 from auth_provider import McpAuthProvider
 
@@ -35,7 +37,12 @@ FUNCTION_URL = os.environ.get("FUNCTION_URL", "http://localhost:7071")
 API_IDENTIFIER_URI = os.environ.get("API_IDENTIFIER_URI", "api://png2pdf-api")
 PORT = int(os.environ.get("PORT", "8080"))
 MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", f"http://localhost:{PORT}")
+STORAGE_ACCOUNT_NAME = os.environ.get("STORAGE_ACCOUNT_NAME", "")
+CONTAINER_NAME = "pdfs"
 MAX_INPUT_SIZE = 10 * 1024 * 1024  # 10 MB
+
+# Validate blob names (UUID + .pdf)
+_BLOB_NAME_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.pdf$")
 
 # Derive allowed hosts from the server URL for DNS rebinding protection
 from urllib.parse import urlparse
@@ -57,6 +64,17 @@ logger = logging.getLogger("mcp-server")
 
 # ─── Azure credential for calling Function App (Layer 3 — managed identity) ───
 credential = DefaultAzureCredential()
+
+# ─── Async blob service client for PDF downloads ───
+_blob_service_client = None
+
+
+async def _get_blob_service_client() -> BlobServiceClient:
+    global _blob_service_client
+    if _blob_service_client is None:
+        account_url = f"https://{STORAGE_ACCOUNT_NAME}.blob.core.windows.net"
+        _blob_service_client = BlobServiceClient(account_url, credential=credential)
+    return _blob_service_client
 
 # ─── Auth provider ───
 auth_provider = McpAuthProvider()
@@ -100,15 +118,16 @@ mcp = FastMCP(
 async def convert_png_to_pdf(png_base64: str, filename: str = "image") -> str:
     """Convert a PNG image to a PDF document with matching page dimensions.
 
-    The PNG image is sent as a base64-encoded string and the resulting PDF
-    is returned as a base64-encoded string.
+    The PNG image is sent as a base64-encoded string. The resulting PDF is
+    stored in Azure Blob Storage and a download URL is returned.
 
     Args:
         png_base64: Base64-encoded PNG image data.
         filename: Optional original filename (without extension). Defaults to "image".
 
     Returns:
-        JSON string with pdf_base64 (base64-encoded PDF), filename, and size_bytes.
+        JSON string with download_url (URL to download the PDF via proxy),
+        filename, and size_bytes.
     """
     start_time = time.time()
 
@@ -160,28 +179,78 @@ async def convert_png_to_pdf(png_base64: str, filename: str = "image") -> str:
                 }
             )
 
-        # Encode PDF as base64 for MCP transport
-        pdf_bytes = response.content
-        pdf_base64 = base64.b64encode(pdf_bytes).decode("utf-8")
+        # Parse JSON response from Function App (blob_name, filename, size_bytes)
+        try:
+            data = response.json()
+        except Exception:
+            return json.dumps({"error": "Invalid response from Function App"})
+
+        blob_name = data.get("blob_name", "")
+        output_filename = data.get("filename", filename + ".pdf")
+        size_bytes = data.get("size_bytes", 0)
+
+        # Build download URL through the MCP server proxy
+        download_url = f"{MCP_SERVER_URL}/download/{blob_name}"
 
         logger.info(
-            "Conversion successful: input=%d bytes, output=%d bytes, duration=%dms",
+            "Conversion successful: input=%d bytes, output=%d bytes, blob=%s, duration=%dms",
             len(png_bytes),
-            len(pdf_bytes),
+            size_bytes,
+            blob_name,
             duration_ms,
         )
 
         return json.dumps(
             {
-                "pdf_base64": pdf_base64,
+                "download_url": download_url,
                 "filename": output_filename,
-                "size_bytes": len(pdf_bytes),
+                "size_bytes": size_bytes,
             }
         )
 
     except Exception as e:
         logger.exception("Conversion error")
         return json.dumps({"error": f"Conversion failed: {str(e)}"})
+
+
+# ─── Download proxy endpoint ───
+
+
+async def download_pdf(request: Request) -> StarletteResponse:
+    """Proxy download a PDF from blob storage using managed identity.
+
+    No authentication required — the blob name is a UUID which acts as an
+    unguessable capability URL. The blob auto-expires after 24 hours.
+    """
+    blob_name = request.path_params["blob_name"]
+
+    if not _BLOB_NAME_RE.match(blob_name):
+        return JSONResponse({"error": "Invalid blob name"}, status_code=400)
+
+    try:
+        blob_service = await _get_blob_service_client()
+        blob_client = blob_service.get_blob_client(
+            container=CONTAINER_NAME, blob=blob_name
+        )
+        download_stream = await blob_client.download_blob()
+        pdf_bytes = await download_stream.readall()
+
+        return StarletteResponse(
+            content=pdf_bytes,
+            status_code=200,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'attachment; filename="{blob_name}"',
+            },
+        )
+    except Exception as exc:
+        error_msg = str(exc)
+        if "BlobNotFound" in error_msg or "404" in error_msg:
+            return JSONResponse({"error": "PDF not found"}, status_code=404)
+        logger.exception("Failed to download blob %s", blob_name)
+        return JSONResponse(
+            {"error": f"Failed to download PDF: {error_msg}"}, status_code=500
+        )
 
 
 # ─── Health endpoint ───
@@ -208,6 +277,7 @@ def create_app() -> Starlette:
     app = Starlette(
         routes=[
             Route("/health", health, methods=["GET"]),
+            Route("/download/{blob_name}", download_pdf, methods=["GET"]),
             Mount("/", app=mcp_app),
         ],
         lifespan=lifespan,

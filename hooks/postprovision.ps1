@@ -13,6 +13,7 @@ $funcUrl   = $env:FUNCTION_URL
 $apiUri    = $env:API_IDENTIFIER_URI
 $webClientId = $env:WEB_CLIENT_ID
 $tenantId  = $env:AZURE_TENANT_ID
+$storageAccountName = $env:STORAGE_ACCOUNT_NAME
 
 if (-not $appName) {
     Write-Warning "CONTAINER_APP_NAME env var is not set - cannot update web app."
@@ -20,8 +21,9 @@ if (-not $appName) {
     Write-Host "  Container App      : $appName"
     Write-Host "  Function URL       : $funcUrl"
     Write-Host "  API Identifier URI : $apiUri"
+    Write-Host "  Storage Account    : $storageAccountName"
 
-    az containerapp update -n $appName -g $rgName --subscription $subId --set-env-vars "FUNCTION_URL=$funcUrl" "API_IDENTIFIER_URI=$apiUri"
+    az containerapp update -n $appName -g $rgName --subscription $subId --set-env-vars "FUNCTION_URL=$funcUrl" "API_IDENTIFIER_URI=$apiUri" "STORAGE_ACCOUNT_NAME=$storageAccountName"
 
     Write-Host "Web Container App updated successfully."
 }
@@ -83,8 +85,9 @@ if (-not $mcpAppName) {
     Write-Host "  Function URL       : $funcUrl"
     Write-Host "  API Identifier URI : $apiUri"
     Write-Host "  MCP Server URL     : $mcpUrl"
+    Write-Host "  Storage Account    : $storageAccountName"
 
-    az containerapp update -n $mcpAppName -g $rgName --subscription $subId --set-env-vars "FUNCTION_URL=$funcUrl" "API_IDENTIFIER_URI=$apiUri" "MCP_SERVER_URL=$mcpUrl"
+    az containerapp update -n $mcpAppName -g $rgName --subscription $subId --set-env-vars "FUNCTION_URL=$funcUrl" "API_IDENTIFIER_URI=$apiUri" "MCP_SERVER_URL=$mcpUrl" "STORAGE_ACCOUNT_NAME=$storageAccountName"
 
     Write-Host "MCP Container App updated successfully."
 }

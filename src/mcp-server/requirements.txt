@@ -6,3 +6,4 @@ PyJWT[crypto]>=2.8.0
 cryptography>=42.0.0
 uvicorn>=0.30.0
 starlette>=0.38.0
+azure-storage-blob[aio]>=12.19.0

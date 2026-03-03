@@ -21,6 +21,9 @@ param location string
 @description('Entra ID tenant ID (auto-detected)')
 param tenantId string = tenant().tenantId
 
+@description('Principal ID of the deploying user (for storage blob deployment access)')
+param principalId string = ''
+
 // ─── Resource Group ───
 resource rg 'Microsoft.Resources/resourceGroups@2024-03-01' = {
   name: 'rg-${environmentName}'
@@ -93,6 +96,8 @@ module containerApp 'modules/container-app.bicep' = {
     // These will be updated by post-provision hook once all resources exist
     functionUrl: ''
     apiIdentifierUri: ''
+    // Storage account name is set after Function App deploys (see post-provision hook)
+    storageAccountName: ''
   }
 }
 
@@ -125,6 +130,8 @@ module mcpContainerApp 'modules/mcp-container-app.bicep' = {
     mcpClientId: appRegistration.outputs.mcpClientId
     tenantId: tenantId
     appInsightsConnectionString: appInsights.outputs.connectionString
+    // Storage account name is set after Function App deploys (see post-provision hook)
+    storageAccountName: ''
   }
 }
 
@@ -141,6 +148,9 @@ module functionApp 'modules/function-app.bicep' = {
     authClientId: appRegistration.outputs.apiClientId
     authTenantId: tenantId
     authIdentifierUri: appRegistration.outputs.apiIdentifierUri
+    webAppPrincipalId: containerApp.outputs.principalId
+    mcpAppPrincipalId: mcpContainerApp.outputs.principalId
+    deployerPrincipalId: principalId
   }
 }
 
@@ -159,3 +169,4 @@ output MCP_URL string = 'https://${mcpContainerApp.outputs.fqdn}'
 output MCP_CONTAINER_APP_NAME string = mcpContainerApp.outputs.name
 output MCP_CLIENT_ID string = appRegistration.outputs.mcpClientId
 output MCP_IDENTIFIER_URI string = appRegistration.outputs.mcpIdentifierUri
+output STORAGE_ACCOUNT_NAME string = functionApp.outputs.storageAccountName

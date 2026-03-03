@@ -39,6 +39,9 @@ param functionUrl string = ''
 @description('API identifier URI for managed identity token audience')
 param apiIdentifierUri string = ''
 
+@description('Storage account name for PDF blob access')
+param storageAccountName string = ''
+
 var resourceSuffix = take(uniqueString(subscription().id, resourceGroup().id, name), 6)
 var envName = 'cae-${name}-${resourceSuffix}'
 var appName = 'ca-${name}-${resourceSuffix}'
@@ -107,6 +110,10 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             {
               name: 'API_IDENTIFIER_URI'
               value: apiIdentifierUri
+            }
+            {
+              name: 'STORAGE_ACCOUNT_NAME'
+              value: storageAccountName
             }
           ]
         }

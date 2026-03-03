@@ -26,6 +26,15 @@ param authTenantId string = ''
 @description('API identifier URI for audience validation')
 param authIdentifierUri string = ''
 
+@description('Principal ID of the web Container App managed identity (for blob reader access)')
+param webAppPrincipalId string = ''
+
+@description('Principal ID of the MCP Container App managed identity (for blob reader access)')
+param mcpAppPrincipalId string = ''
+
+@description('Principal ID of the deploying user (for zip deployment to blob storage)')
+param deployerPrincipalId string = ''
+
 var resourceSuffix = take(uniqueString(subscription().id, resourceGroup().id, name), 6)
 var funcAppName = 'func-${name}-${resourceSuffix}'
 var planName = 'asp-${name}-${resourceSuffix}'
@@ -45,6 +54,7 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
     supportsHttpsTrafficOnly: true
     minimumTlsVersion: 'TLS1_2'
     allowSharedKeyAccess: false
+    publicNetworkAccess: 'Enabled'  // Required: azd deploys zip via data plane (Entra auth, no shared keys)
   }
 }
 
@@ -57,6 +67,41 @@ resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01'
 resource deploymentContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
   parent: blobService
   name: deploymentContainerName
+}
+
+// ─── Blob container for generated PDFs ───
+resource pdfsContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
+  parent: blobService
+  name: 'pdfs'
+}
+
+// ─── Lifecycle management policy — auto-delete PDFs after 24 hours ───
+resource lifecyclePolicy 'Microsoft.Storage/storageAccounts/managementPolicies@2023-05-01' = {
+  parent: storageAccount
+  name: 'default'
+  properties: {
+    policy: {
+      rules: [
+        {
+          name: 'delete-pdfs-after-24h'
+          type: 'Lifecycle'
+          definition: {
+            actions: {
+              baseBlob: {
+                delete: {
+                  daysAfterCreationGreaterThan: 1
+                }
+              }
+            }
+            filters: {
+              blobTypes: [ 'blockBlob' ]
+              prefixMatch: [ 'pdfs/' ]
+            }
+          }
+        }
+      ]
+    }
+  }
 }
 
 // ─── Role assignments for identity-based storage access ───
@@ -90,6 +135,39 @@ resource storageTableDataContributor 'Microsoft.Authorization/roleAssignments@20
     principalId: functionApp.identity.principalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3')
+  }
+}
+
+// Storage Blob Data Reader – allows web Container App to download generated PDFs
+resource webBlobDataReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(webAppPrincipalId)) {
+  name: guid(storageAccount.id, webAppPrincipalId, '2a2b9908-6ea1-4ae2-8e65-a410df84e7d1')
+  scope: storageAccount
+  properties: {
+    principalId: webAppPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '2a2b9908-6ea1-4ae2-8e65-a410df84e7d1')
+  }
+}
+
+// Storage Blob Data Reader – allows MCP Container App to download generated PDFs
+resource mcpBlobDataReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(mcpAppPrincipalId)) {
+  name: guid(storageAccount.id, mcpAppPrincipalId, '2a2b9908-6ea1-4ae2-8e65-a410df84e7d1')
+  scope: storageAccount
+  properties: {
+    principalId: mcpAppPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '2a2b9908-6ea1-4ae2-8e65-a410df84e7d1')
+  }
+}
+
+// Storage Blob Data Contributor – allows the deploying user to upload zip packages for Flex Consumption
+resource deployerBlobDataContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(deployerPrincipalId)) {
+  name: guid(storageAccount.id, deployerPrincipalId, 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')
+  scope: storageAccount
+  properties: {
+    principalId: deployerPrincipalId
+    principalType: 'User'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')
   }
 }
 
@@ -159,6 +237,10 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
           name: 'API_CLIENT_ID'
           value: authClientId
         }
+        {
+          name: 'STORAGE_ACCOUNT_NAME'
+          value: storageAccount.name
+        }
       ]
       cors: {
         allowedOrigins: allowedOrigins
@@ -182,3 +264,6 @@ output id string = functionApp.id
 
 @description('Function App name')
 output functionAppName string = functionApp.name
+
+@description('Storage account name (shared with web and MCP for PDF blob access)')
+output storageAccountName string = storageAccount.name
