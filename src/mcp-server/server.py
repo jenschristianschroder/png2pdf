@@ -37,6 +37,16 @@ PORT = int(os.environ.get("PORT", "8080"))
 MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", f"http://localhost:{PORT}")
 MAX_INPUT_SIZE = 10 * 1024 * 1024  # 10 MB
 
+# Derive allowed hosts from the server URL for DNS rebinding protection
+from urllib.parse import urlparse
+
+_parsed = urlparse(MCP_SERVER_URL)
+_allowed_hosts = [_parsed.hostname]
+if _parsed.port:
+    _allowed_hosts.append(f"{_parsed.hostname}:{_parsed.port}")
+# Also allow localhost for health probes inside the container
+_allowed_hosts.extend([f"localhost:{PORT}", f"127.0.0.1:{PORT}"])
+
 # ─── Logging ───
 logging.basicConfig(
     level=logging.INFO,
@@ -74,6 +84,10 @@ mcp = FastMCP(
         },
         "revocation_options": {"enabled": True},
         "required_scopes": ["convert"],
+    },
+    transport_security={
+        "enable_dns_rebinding_protection": True,
+        "allowed_hosts": _allowed_hosts,
     },
 )
 
