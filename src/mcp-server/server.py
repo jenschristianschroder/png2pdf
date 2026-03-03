@@ -82,7 +82,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
         except AuthError as e:
             logger.warning("Auth failed: %s", e.message)
             # Return WWW-Authenticate header per RFC 6750 §3
-            resource_metadata_url = str(request.base_url).rstrip("/") + "/.well-known/oauth-protected-resource"
+            scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+            host = request.headers.get("host", request.url.netloc)
+            resource_metadata_url = f"{scheme}://{host}/.well-known/oauth-protected-resource"
             return JSONResponse(
                 {"error": e.message},
                 status_code=e.status_code,
@@ -199,7 +201,10 @@ async def oauth_protected_resource(request: Request) -> JSONResponse:
     3. It fetches Entra ID's openid-configuration for authorize/token endpoints
     4. It authenticates and sends Bearer tokens on subsequent MCP requests
     """
-    server_url = str(request.base_url).rstrip("/")
+    # Use X-Forwarded-Proto to get the real scheme behind a TLS-terminating proxy
+    scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("host", request.url.netloc)
+    server_url = f"{scheme}://{host}"
 
     return JSONResponse(
         {
