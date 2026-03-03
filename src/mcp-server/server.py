@@ -69,11 +69,12 @@ auth_provider = McpAuthProvider()
 #   /authorize  (Authorization Code + PKCE)
 #   /token      (Token exchange)
 #   /revoke     (Token revocation)
-#   /mcp        (Streamable HTTP — protected by token verifier)
+#   /           (Streamable HTTP — protected by bearer auth)
 mcp = FastMCP(
     "PNG to PDF Converter",
     instructions="Converts PNG images to PDF documents with matching page dimensions.",
     auth_server_provider=auth_provider,
+    streamable_http_path="/",
     auth={
         "issuer_url": MCP_SERVER_URL,
         "resource_server_url": MCP_SERVER_URL,
