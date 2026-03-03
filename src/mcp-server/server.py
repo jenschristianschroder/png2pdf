@@ -51,7 +51,7 @@ credential = DefaultAzureCredential()
 # ─── MCP Server ───
 mcp = FastMCP(
     "PNG to PDF Converter",
-    description="Converts PNG images to PDF documents with matching page dimensions.",
+    instructions="Converts PNG images to PDF documents with matching page dimensions.",
 )
 
 
