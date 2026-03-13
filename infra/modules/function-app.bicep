@@ -35,6 +35,9 @@ param mcpAppPrincipalId string = ''
 @description('Principal ID of the deploying user (for zip deployment to blob storage)')
 param deployerPrincipalId string = ''
 
+@description('Subnet resource ID for Function App VNet integration (outbound traffic)')
+param virtualNetworkSubnetId string = ''
+
 var resourceSuffix = take(uniqueString(subscription().id, resourceGroup().id, name), 6)
 var funcAppName = 'func-${name}-${resourceSuffix}'
 var planName = 'asp-${name}-${resourceSuffix}'
@@ -54,7 +57,11 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
     supportsHttpsTrafficOnly: true
     minimumTlsVersion: 'TLS1_2'
     allowSharedKeyAccess: false
-    publicNetworkAccess: 'Enabled'  // Required: azd deploys zip via data plane (Entra auth, no shared keys)
+    publicNetworkAccess: 'Disabled'
+    networkAcls: {
+      defaultAction: 'Deny'
+      bypass: 'AzureServices'
+    }
   }
 }
 
@@ -198,6 +205,7 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
   properties: {
     serverFarmId: hostingPlan.id
     httpsOnly: true
+    virtualNetworkSubnetId: !empty(virtualNetworkSubnetId) ? virtualNetworkSubnetId : null
     functionAppConfig: {
       deployment: {
         storage: {
@@ -247,6 +255,10 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
           name: 'STORAGE_ACCOUNT_NAME'
           value: storageAccount.name
         }
+        {
+          name: 'WEBSITE_CONTENTOVERVNET'
+          value: '1'
+        }
       ]
       cors: {
         allowedOrigins: allowedOrigins
@@ -273,3 +285,6 @@ output functionAppName string = functionApp.name
 
 @description('Storage account name (shared with web and MCP for PDF blob access)')
 output storageAccountName string = storageAccount.name
+
+@description('Storage account resource ID (for private endpoint)')
+output storageAccountId string = storageAccount.id

@@ -2,11 +2,12 @@
 // Subscription-scoped deployment that creates a resource group and all services.
 //
 // Deployment order (avoids circular refs):
-//   1. Foundation: RG → Log Analytics → App Insights → ACR
+//   1. Foundation: RG → Log Analytics → App Insights → ACR → VNet
 //   2. Container App (web UI)     — deployed first so we know its FQDN
 //   3. App Registrations          — SPA redirect URI needs the Container App FQDN
 //   4. Function App (API)         — CORS + Easy Auth need Container App URL + app reg IDs
-//   5. Post-deploy: azd hooks update Container App env vars with final Function URL + auth values
+//   5. Storage Private Endpoint   — needs storage account ID from Function App module
+//   6. Post-deploy: azd hooks update Container App env vars with final Function URL + auth values
 
 targetScope = 'subscription'
 
@@ -76,6 +77,17 @@ module acrCredentials 'modules/acr-credentials.bicep' = {
   }
 }
 
+// ─── Virtual Network & Private DNS ───
+module network 'modules/network.bicep' = {
+  name: 'network'
+  scope: rg
+  params: {
+    name: environmentName
+    location: location
+    tags: { 'azd-env-name': environmentName }
+  }
+}
+
 // ─── Container App (Web UI) ───
 // Deployed before Function App & App Registration so we have the FQDN.
 // MSAL config (client IDs, scopes) and Function URL are injected as env vars
@@ -98,6 +110,7 @@ module containerApp 'modules/container-app.bicep' = {
     apiIdentifierUri: ''
     // Storage account name is set after Function App deploys (see post-provision hook)
     storageAccountName: ''
+    infrastructureSubnetId: network.outputs.containerAppsSubnetId
   }
 }
 
@@ -151,6 +164,21 @@ module functionApp 'modules/function-app.bicep' = {
     webAppPrincipalId: containerApp.outputs.principalId
     mcpAppPrincipalId: mcpContainerApp.outputs.principalId
     deployerPrincipalId: principalId
+    virtualNetworkSubnetId: network.outputs.functionsSubnetId
+  }
+}
+
+// ─── Storage Private Endpoint ───
+module storagePrivateEndpoint 'modules/storage-private-endpoint.bicep' = {
+  name: 'storage-private-endpoint'
+  scope: rg
+  params: {
+    name: environmentName
+    location: location
+    tags: { 'azd-env-name': environmentName }
+    storageAccountId: functionApp.outputs.storageAccountId
+    subnetId: network.outputs.privateEndpointsSubnetId
+    privateDnsZoneId: network.outputs.privateDnsZoneId
   }
 }
 

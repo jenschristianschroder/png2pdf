@@ -42,6 +42,9 @@ param apiIdentifierUri string = ''
 @description('Storage account name for PDF blob access')
 param storageAccountName string = ''
 
+@description('Subnet resource ID for Container Apps Environment VNet integration')
+param infrastructureSubnetId string = ''
+
 var resourceSuffix = take(uniqueString(subscription().id, resourceGroup().id, name), 6)
 var envName = 'cae-${name}-${resourceSuffix}'
 var appName = 'ca-${name}-${resourceSuffix}'
@@ -52,6 +55,10 @@ resource containerAppEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
   location: location
   tags: tags
   properties: {
+    vnetConfiguration: !empty(infrastructureSubnetId) ? {
+      infrastructureSubnetId: infrastructureSubnetId
+      internal: false
+    } : null
     appLogsConfiguration: {
       destination: 'log-analytics'
       logAnalyticsConfiguration: {

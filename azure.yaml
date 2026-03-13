@@ -12,6 +12,20 @@ hooks:
     posix:
       shell: sh
       run: pwsh -File ./hooks/postprovision.ps1
+  predeploy:
+    windows:
+      shell: pwsh
+      run: ./hooks/predeploy.ps1
+    posix:
+      shell: sh
+      run: pwsh -File ./hooks/predeploy.ps1
+  postdeploy:
+    windows:
+      shell: pwsh
+      run: ./hooks/postdeploy.ps1
+    posix:
+      shell: sh
+      run: pwsh -File ./hooks/postdeploy.ps1
 
 services:
   api:
