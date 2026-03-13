@@ -5,13 +5,17 @@ system-assigned managed identity for authentication.
 Serves /api/download/<blob_name> as a proxy to blob storage (MI-based access).
 """
 
+import logging
 import os
 import re
+import time
 
 import requests as http_requests
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient
 from flask import Flask, render_template, request, Response, jsonify
+
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
@@ -66,31 +70,53 @@ def proxy_convert():
     else:
         auth_header = None
 
-    # Forward the multipart upload to the Function App
+    # Forward the multipart upload to the Function App (retry on 503 cold starts)
     headers = {}
     if auth_header:
         headers["Authorization"] = auth_header
 
-    # Stream the file through
-    try:
-        files = {}
-        if "file" in request.files:
-            f = request.files["file"]
-            files["file"] = (f.filename, f.stream, f.content_type)
+    max_retries = 3
+    retry_delay = 2  # seconds
 
-        resp = http_requests.post(
-            f"{FUNCTION_URL}/api/convert",
-            files=files if files else None,
-            data=request.get_data() if not files else None,
-            headers=headers,
-            timeout=60,
-        )
-    except http_requests.RequestException as exc:
-        return Response(
-            f'{{"error": "Function App request failed: {exc}"}}',
-            status=502,
-            mimetype="application/json",
-        )
+    for attempt in range(max_retries + 1):
+        try:
+            files = {}
+            if "file" in request.files:
+                f = request.files["file"]
+                f.stream.seek(0)
+                files["file"] = (f.filename, f.stream, f.content_type)
+
+            resp = http_requests.post(
+                f"{FUNCTION_URL}/api/convert",
+                files=files if files else None,
+                data=request.get_data() if not files else None,
+                headers=headers,
+                timeout=60,
+            )
+
+            if resp.status_code != 503 or attempt == max_retries:
+                break
+
+            logger.warning(
+                "Function App returned 503 (attempt %d/%d), retrying in %ds...",
+                attempt + 1, max_retries + 1, retry_delay,
+            )
+            time.sleep(retry_delay)
+            retry_delay *= 2
+
+        except http_requests.RequestException as exc:
+            if attempt == max_retries:
+                return Response(
+                    f'{{"error": "Function App request failed: {exc}"}}',
+                    status=502,
+                    mimetype="application/json",
+                )
+            logger.warning(
+                "Function App request error (attempt %d/%d): %s",
+                attempt + 1, max_retries + 1, exc,
+            )
+            time.sleep(retry_delay)
+            retry_delay *= 2
 
     # Pass through the Function App response (now JSON with blob_name)
     if resp.status_code != 200:

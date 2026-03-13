@@ -211,6 +211,12 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
       scaleAndConcurrency: {
         maximumInstanceCount: 40
         instanceMemoryMB: 2048
+        alwaysReady: [
+          {
+            name: 'http'
+            instanceCount: 1
+          }
+        ]
       }
       runtime: {
         name: 'python'
