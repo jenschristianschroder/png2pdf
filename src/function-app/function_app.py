@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 import uuid
 
 import azure.functions as func
@@ -153,3 +154,67 @@ def convert(req: func.HttpRequest) -> func.HttpResponse:
         status_code=200,
         mimetype="application/json",
     )
+
+
+# Validate blob names to prevent path traversal (UUID + .pdf)
+_BLOB_NAME_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.pdf$")
+
+
+@app.route(route="download/{blob_name}", methods=["GET", "OPTIONS"])
+def download(req: func.HttpRequest) -> func.HttpResponse:
+    """Download a generated PDF from blob storage.
+
+    The Function App has VNet integration and can reach the storage account
+    via private endpoint, so this endpoint serves as a proxy for clients
+    that cannot access storage directly.
+    """
+    if req.method == "OPTIONS":
+        return func.HttpResponse(status_code=204)
+
+    # --- verify authentication via Bearer token ---
+    auth_header = req.headers.get("Authorization", "")
+    if not _validate_bearer_token(auth_header):
+        return func.HttpResponse(
+            '{"error": "Authentication required"}',
+            status_code=401,
+            mimetype="application/json",
+        )
+
+    blob_name = req.route_params.get("blob_name", "")
+    if not _BLOB_NAME_RE.match(blob_name):
+        return func.HttpResponse(
+            '{"error": "Invalid blob name"}',
+            status_code=400,
+            mimetype="application/json",
+        )
+
+    try:
+        blob_client = _get_blob_service_client().get_blob_client(
+            container=_CONTAINER_NAME, blob=blob_name
+        )
+        download_stream = blob_client.download_blob()
+        pdf_bytes = download_stream.readall()
+        content_type = download_stream.properties.content_settings.content_type or "application/pdf"
+
+        return func.HttpResponse(
+            pdf_bytes,
+            status_code=200,
+            mimetype=content_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{blob_name}"',
+            },
+        )
+    except Exception as exc:
+        error_msg = str(exc)
+        if "BlobNotFound" in error_msg or "404" in error_msg:
+            return func.HttpResponse(
+                '{"error": "PDF not found"}',
+                status_code=404,
+                mimetype="application/json",
+            )
+        logging.exception("Failed to download PDF from blob storage")
+        return func.HttpResponse(
+            '{"error": "Failed to download PDF"}',
+            status_code=500,
+            mimetype="application/json",
+        )
