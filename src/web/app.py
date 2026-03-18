@@ -1,8 +1,8 @@
 """Flask web application - proxy UI for the PNG-to-PDF converter.
 
-Proxies /api/convert requests to the Azure Function App using the Container App's
-system-assigned managed identity for authentication.
-Serves /api/download/<blob_name> as a proxy to blob storage (MI-based access).
+Proxies /api/convert and /api/download requests to the Azure Function App
+using the Container App's system-assigned managed identity for authentication.
+The Function App has VNet integration and can reach storage via private endpoint.
 """
 
 import logging
@@ -12,7 +12,6 @@ import time
 
 import requests as http_requests
 from azure.identity import DefaultAzureCredential
-from azure.storage.blob import BlobServiceClient
 from flask import Flask, render_template, request, Response, jsonify
 
 logger = logging.getLogger(__name__)
@@ -21,12 +20,9 @@ app = Flask(__name__)
 
 FUNCTION_URL = os.environ.get("FUNCTION_URL", "http://localhost:7071")
 API_IDENTIFIER_URI = os.environ.get("API_IDENTIFIER_URI", "")
-STORAGE_ACCOUNT_NAME = os.environ.get("STORAGE_ACCOUNT_NAME", "")
-CONTAINER_NAME = "pdfs"
 
 # Managed identity credential (works automatically in Azure Container Apps)
 _credential = None
-_blob_service_client = None
 
 # Validate blob names to prevent path traversal (UUID + .pdf)
 _BLOB_NAME_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.pdf$")
@@ -37,14 +33,6 @@ def _get_credential():
     if _credential is None:
         _credential = DefaultAzureCredential()
     return _credential
-
-
-def _get_blob_service_client() -> BlobServiceClient:
-    global _blob_service_client
-    if _blob_service_client is None:
-        account_url = f"https://{STORAGE_ACCOUNT_NAME}.blob.core.windows.net"
-        _blob_service_client = BlobServiceClient(account_url, credential=_get_credential())
-    return _blob_service_client
 
 
 @app.route("/")
@@ -142,33 +130,48 @@ def proxy_convert():
 
 @app.route("/api/download/<blob_name>")
 def download_pdf(blob_name):
-    """Proxy download a PDF from blob storage using managed identity."""
+    """Proxy download a PDF from blob storage via the Function App.
+
+    Routes through the Function App which has VNet integration and can
+    reach the storage account via private endpoint.
+    """
     if not _BLOB_NAME_RE.match(blob_name):
         return Response('{"error": "Invalid blob name"}', status=400, mimetype="application/json")
 
+    # Acquire MI token for the Function App API
+    headers = {}
+    if API_IDENTIFIER_URI:
+        try:
+            token = _get_credential().get_token(f"{API_IDENTIFIER_URI}/.default")
+            headers["Authorization"] = f"Bearer {token.token}"
+        except Exception as exc:
+            return Response(
+                f'{{"error": "Failed to acquire managed identity token: {exc}"}}',
+                status=500,
+                mimetype="application/json",
+            )
+
     try:
-        blob_client = _get_blob_service_client().get_blob_client(
-            container=CONTAINER_NAME, blob=blob_name
+        resp = http_requests.get(
+            f"{FUNCTION_URL}/api/download/{blob_name}",
+            headers=headers,
+            timeout=60,
         )
-        download_stream = blob_client.download_blob()
-        pdf_bytes = download_stream.readall()
-        content_type = download_stream.properties.content_settings.content_type or "application/pdf"
 
         return Response(
-            pdf_bytes,
-            status=200,
-            mimetype=content_type,
+            resp.content,
+            status=resp.status_code,
+            mimetype=resp.headers.get("Content-Type", "application/pdf"),
             headers={
-                "Content-Disposition": f'attachment; filename="{blob_name}"',
+                "Content-Disposition": resp.headers.get(
+                    "Content-Disposition", f'attachment; filename="{blob_name}"'
+                ),
             },
         )
-    except Exception as exc:
-        error_msg = str(exc)
-        if "BlobNotFound" in error_msg or "404" in error_msg:
-            return Response('{"error": "PDF not found"}', status=404, mimetype="application/json")
+    except http_requests.RequestException as exc:
         return Response(
-            f'{{"error": "Failed to download PDF: {error_msg}"}}',
-            status=500,
+            f'{{"error": "Failed to download PDF: {exc}"}}',
+            status=502,
             mimetype="application/json",
         )
 

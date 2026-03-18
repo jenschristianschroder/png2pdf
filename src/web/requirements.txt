@@ -2,4 +2,3 @@ Flask>=3.0
 gunicorn>=22.0
 requests>=2.31
 azure-identity>=1.15
-azure-storage-blob>=12.19.0
