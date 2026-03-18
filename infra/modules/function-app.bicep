@@ -259,6 +259,10 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
           name: 'WEBSITE_CONTENTOVERVNET'
           value: '1'
         }
+        {
+          name: 'WEBSITE_VNET_ROUTE_ALL'
+          value: '1'
+        }
       ]
       cors: {
         allowedOrigins: allowedOrigins
